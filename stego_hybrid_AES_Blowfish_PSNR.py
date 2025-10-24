@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-stego_hybrid_gui_fixed.py
-Versão corrigida da GUI com:
-- leitura/gravação robusta de imagens (suporta nomes com acentos/espacos no Windows)
-- extração automática do tamanho do payload (não precisa passar length)
-- AES + Blowfish + LSB
+stego_hybrid_gui_histogram.py
+Interface completa com:
+- Criptografia Híbrida AES + Blowfish
+- Esteganografia LSB
+- Geração e comparação de histogramas
+- Leitura robusta de imagens (suporta nomes com acentos/espacos no Windows)
+
 Dependências:
-pip install pycryptodome opencv-python numpy pillow
+pip install pycryptodome opencv-python numpy pillow matplotlib
 """
 
 import os
@@ -19,6 +21,7 @@ import cv2
 from Crypto.Cipher import AES, Blowfish
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
+import matplotlib.pyplot as plt
 
 # -------------------------
 # Criptografia híbrida AES + Blowfish
@@ -59,16 +62,14 @@ def bytes_to_bits(data: bytes) -> str:
     return ''.join(f'{b:08b}' for b in data)
 
 def bits_to_bytes(bits: str) -> bytes:
-    # pad to multiple of 8
     if len(bits) % 8 != 0:
         bits += '0' * (8 - (len(bits) % 8))
     return bytes(int(bits[i:i+8], 2) for i in range(0, len(bits), 8))
 
 # -------------------------
-# IO robusta para imagens (Windows compatível com caminhos com acentos)
+# IO robusta para imagens
 # -------------------------
 def imread_robust(path):
-    # Retorna imagem BGR (cv2 format) ou None
     try:
         arr = np.fromfile(path, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -77,7 +78,6 @@ def imread_robust(path):
         return None
 
 def imwrite_robust(path, img):
-    # img deve estar em formato cv2 (BGR numpy array)
     ext = os.path.splitext(path)[1].lower()
     if ext == '':
         ext = '.png'
@@ -85,26 +85,23 @@ def imwrite_robust(path, img):
     success, enc = cv2.imencode(ext, img)
     if not success:
         raise IOError("Falha ao codificar imagem para escrita.")
-    # tofile lida melhor com nomes com acentos no Windows
     with open(path, 'wb') as f:
         enc.tofile(f)
     return path
 
 # -------------------------
-# LSB embed / extract (agora extract auto detecta payload size)
+# LSB (embed / extract)
 # -------------------------
 def embed_message_lsb(image_path: str, message_bytes: bytes, output_path: str):
     img = imread_robust(image_path)
     if img is None:
         raise FileNotFoundError(f"Não foi possível abrir a imagem: {image_path}")
 
-    h, w, c = img.shape
     flat = img.flatten()
     bits = bytes_to_bits(message_bytes)
     if len(bits) > flat.size:
         raise ValueError(f"Mensagem muito grande para essa imagem. capacidade_bits={flat.size}, necessário_bits={len(bits)}")
 
-    # embed
     for i, bit in enumerate(bits):
         flat[i] = (flat[i] & 254) | int(bit)
 
@@ -113,26 +110,18 @@ def embed_message_lsb(image_path: str, message_bytes: bytes, output_path: str):
     return output_path
 
 def extract_message_lsb_auto(stego_path: str):
-    """
-    Extrai automaticamente o payload lendo primeiro 32 bits (4 bytes) do LSB.
-    O header é: 4 bytes (big-endian) = tamanho do ciphertext (c_len)
-    Mas no payload que montamos: payload = [4 c_len] + aes_key(16) + aes_iv(16) + blow_key(16) + blow_iv(8) + ciphertext(c_len)
-    Precisamos ler (4 + 16 +16 +16 +8 + c_len) bytes = 60 + c_len bytes total.
-    Aqui primeiro lemos 4 bytes (32 bits) para obter c_len e então lemos o total.
-    Retorna bytes do payload completo.
-    """
     img = imread_robust(stego_path)
     if img is None:
         raise FileNotFoundError(f"Não foi possível abrir a imagem: {stego_path}")
 
     flat = img.flatten()
 
-    # Ler primeiro 32 bits -> 4 bytes para c_len
+    # ler primeiros 32 bits -> 4 bytes = tamanho ciphertext
     header_bits = ''.join(str(int(flat[i] & 1)) for i in range(32))
     header_bytes = bits_to_bytes(header_bits)
     c_len = struct.unpack(">I", header_bytes)[0]
 
-    total_bytes = 4 + 16 + 16 + 16 + 8 + c_len  # 4 + aes_key + aes_iv + blow_key + blow_iv + ciphertext
+    total_bytes = 4 + 16 + 16 + 16 + 8 + c_len
     total_bits = total_bytes * 8
 
     if total_bits > flat.size:
@@ -143,13 +132,41 @@ def extract_message_lsb_auto(stego_path: str):
     return payload
 
 # -------------------------
+# Histograma comparativo
+# -------------------------
+def plot_histograms(original_path, stego_path, output_path="hist_comparison.png"):
+    orig = imread_robust(original_path)
+    steg = imread_robust(stego_path)
+
+    if orig is None or steg is None:
+        raise FileNotFoundError("Erro ao abrir imagem original ou estego.")
+
+    colors = ('b', 'g', 'r')
+    plt.figure(figsize=(10, 6))
+    for i, col in enumerate(colors):
+        hist_orig = cv2.calcHist([orig], [i], None, [256], [0, 256])
+        hist_steg = cv2.calcHist([steg], [i], None, [256], [0, 256])
+        plt.plot(hist_orig, color=col, linestyle='--', label=f'Original {col.upper()}')
+        plt.plot(hist_steg, color=col, label=f'Estego {col.upper()}')
+
+    plt.title("Comparação de Histogramas (Original vs Estego)")
+    plt.xlabel("Intensidade (0–255)")
+    plt.ylabel("Frequência de pixels")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    return output_path
+
+# -------------------------
 # GUI (Tkinter)
 # -------------------------
 class StegoApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("🔐 AES + Blowfish + LSB (GUI)")
-        self.root.geometry("760x620")
+        self.root.title("🔐 AES + Blowfish + LSB (com Histograma)")
+        self.root.geometry("780x660")
         self.root.resizable(False, False)
 
         self.image_path = None
@@ -167,6 +184,7 @@ class StegoApp:
         tk.Button(btn_frame, text="📂 Escolher Imagem", width=18, command=self.choose_image, bg="#2e86de", fg="white").grid(row=0, column=0, padx=6)
         tk.Button(btn_frame, text="🔒 Esconder Mensagem", width=18, command=self.encrypt_and_hide, bg="#27ae60", fg="white").grid(row=0, column=1, padx=6)
         tk.Button(btn_frame, text="🔓 Revelar Mensagem", width=18, command=self.extract_and_decrypt, bg="#c0392b", fg="white").grid(row=0, column=2, padx=6)
+        tk.Button(btn_frame, text="📊 Gerar Histograma", width=18, command=self.generate_histogram, bg="#f39c12", fg="white").grid(row=0, column=3, padx=6)
 
         self.img_label = tk.Label(self.root, text="Nenhuma imagem selecionada", font=("Arial", 11))
         self.img_label.pack()
@@ -186,11 +204,8 @@ class StegoApp:
         path = filedialog.askopenfilename(title="Escolha uma imagem", filetypes=[("Imagens", "*.png *.bmp *.jpg *.jpeg")])
         if not path:
             return
-        # guarda caminho absoluto
         self.image_path = os.path.abspath(path)
         self.img_label.config(text=os.path.basename(self.image_path))
-
-        # mostra miniatura
         try:
             pil_img = Image.open(self.image_path)
             pil_img.thumbnail((300, 300))
@@ -211,10 +226,7 @@ class StegoApp:
             return
 
         try:
-            # criptografa
             self.enc_data = hybrid_encrypt(message)
-
-            # monta payload: [4 c_len] + aes_key(16) + aes_iv(16) + blow_key(16) + blow_iv(8) + ciphertext
             payload = (
                 struct.pack(">I", len(self.enc_data["ciphertext"])) +
                 self.enc_data["aes_key"] + self.enc_data["aes_iv"] +
@@ -222,23 +234,21 @@ class StegoApp:
                 self.enc_data["ciphertext"]
             )
             self.payload_bytes = payload
-
-            # embute
             embed_message_lsb(self.image_path, payload, self.stego_path)
-            self.log(f"[OK] Mensagem escondida em: {self.stego_path} (payload {len(payload)} bytes)")
-            messagebox.showinfo("Sucesso", f"Mensagem escondida com sucesso! Arquivo: {self.stego_path}")
+            self.log(f"[OK] Mensagem escondida em: {self.stego_path}")
+            messagebox.showinfo("Sucesso", f"Mensagem escondida com sucesso!\nArquivo: {self.stego_path}")
+            # gera histograma automaticamente
+            self.generate_histogram(auto=True)
         except Exception as e:
             self.log(f"[ERRO] Falha ao embutir: {e}")
             messagebox.showerror("Erro", f"Falha ao embutir: {e}")
 
     def extract_and_decrypt(self):
         if not os.path.exists(self.stego_path):
-            messagebox.showerror("Erro", f"Arquivo {self.stego_path} não encontrado. Primeiro execute 'Esconder Mensagem'.")
+            messagebox.showerror("Erro", f"Arquivo {self.stego_path} não encontrado.")
             return
-
         try:
             payload = extract_message_lsb_auto(self.stego_path)
-            # parse payload
             idx = 0
             c_len = struct.unpack(">I", payload[idx:idx+4])[0]; idx += 4
             aes_key = payload[idx:idx+16]; idx += 16
@@ -246,7 +256,6 @@ class StegoApp:
             blow_key = payload[idx:idx+16]; idx += 16
             blow_iv = payload[idx:idx+8]; idx += 8
             ciphertext = payload[idx:idx+c_len]
-
             encdata = {
                 "aes_key": aes_key,
                 "aes_iv": aes_iv,
@@ -260,6 +269,20 @@ class StegoApp:
         except Exception as e:
             self.log(f"[ERRO] Falha ao extrair/decifrar: {e}")
             messagebox.showerror("Erro", f"Falha ao extrair/decifrar: {e}")
+
+    def generate_histogram(self, auto=False):
+        try:
+            if not self.image_path or not os.path.exists(self.stego_path):
+                messagebox.showerror("Erro", "Gere uma imagem estego primeiro.")
+                return
+            out_path = "hist_comparison.png"
+            plot_histograms(self.image_path, self.stego_path, out_path)
+            self.log(f"[OK] Histograma salvo em: {out_path}")
+            if not auto:
+                Image.open(out_path).show()
+        except Exception as e:
+            self.log(f"[ERRO] Falha ao gerar histograma: {e}")
+            messagebox.showerror("Erro", f"Falha ao gerar histograma: {e}")
 
     def log(self, text):
         self.log_box.config(state="normal")
