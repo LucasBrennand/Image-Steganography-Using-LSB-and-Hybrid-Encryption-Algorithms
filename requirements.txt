@@ -1,1 +1,14 @@
-pycryptodome opencv-python numpy
+# Criptografia (AES + Blowfish)
+pycryptodome==3.21.0
+
+# Processamento de imagens
+opencv-python==4.10.0.84
+numpy==1.26.4
+Pillow==10.4.0
+
+# Interface e visualização
+matplotlib==3.9.2
+scikit-image
+
+# Interface gráfica padrão do Python (Tkinter)
+# ⚠️ Tkinter já vem instalado com o Python (não instale via pip)
